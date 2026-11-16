@@ -1,0 +1,9 @@
+{
+  "labels": {
+    "decisions": "合意したこと",
+    "owners": "作業の担当",
+    "deadlines": "提出期限"
+  },
+  "order": ["owners", "deadlines", "decisions", "next"],
+  "style_instructions": "1項目は原則として1文。部署内の用語は言い換えず、決定に至った理由は判断に必要な分だけ書く。"
+}

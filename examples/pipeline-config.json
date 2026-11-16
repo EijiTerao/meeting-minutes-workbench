@@ -1,0 +1,9 @@
+{
+  "transcription": "import",
+  "whisper": "",
+  "whisper_model": "",
+  "language": "ja",
+  "correction": {"provider": "off", "model": ""},
+  "generation": {"provider": "off", "model": ""},
+  "verification": {"provider": "off", "model": ""}
+}

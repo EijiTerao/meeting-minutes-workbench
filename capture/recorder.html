@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: blob:; worker-src blob:; style-src 'unsafe-inline'; img-src 'none'; media-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <title>ローカル音声キャプチャ</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+    body { max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+    fieldset { border: 1px solid #888; border-radius: .5rem; margin: 1rem 0; }
+    label { display: block; margin: .5rem 0; }
+    button { font: inherit; padding: .45rem .9rem; margin-right: .5rem; }
+    #status { min-height: 1.6em; font-weight: 600; }
+    .notice { border-left: .25rem solid #888; padding: .25rem .75rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ローカル音声キャプチャ</h1>
+    <p class="notice">このページは端末内で動作し、録音データをブラウザー内にだけ一時保持します。サーバー送信・自動保存・再生は行いません。停止後にWAVを自分で保存してください。</p>
+    <p>対象の音声だけを選んでください。共有タブ音声はブラウザーが共有画面を求めますが、映像は処理・表示・保存しません。OS音声全体やネイティブアプリ音声は取得できるとは限りません。</p>
+    <fieldset id="choices">
+      <legend>音声ソース（録音開始時にブラウザーの許可が必要です）</legend>
+      <label><input type="radio" name="source" value="mic" checked> マイク</label>
+      <label><input type="radio" name="source" value="tab"> 共有タブの音声</label>
+      <label><input type="radio" name="source" value="both"> マイク＋共有タブ音声</label>
+      <label><input id="consent" type="checkbox"> 選択した音声だけを録音し、停止後に自分で保存することを確認しました</label>
+    </fieldset>
+    <p>録音は最大15分です。ブラウザーを閉じる前に保存してください。音声データはメモリー上限を設け、ページを閉じると失われます。</p>
+    <p>ブラウザーがローカルファイルでの音声APIやAudioWorkletに対応しない場合、このページは録音を開始しません。サーバー経由へ切り替えず、対応ブラウザーで再度お試しください。</p>
+    <div>
+      <button id="start" type="button">録音開始</button>
+      <button id="stop" type="button" disabled>停止</button>
+      <button id="save" type="button" disabled>WAVを保存</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">待機中</p>
+    <p id="timer">00:00</p>
+    <p id="detail"></p>
+  </main>
+  <script src="recorder.js"></script>
+</body>
+</html>
