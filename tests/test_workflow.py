@@ -39,6 +39,31 @@ class WorkflowTests(unittest.TestCase):
                 run_workflow("発言", "会議", settings, {})
         call.assert_not_called()
 
+    def test_anthropic_auth_is_separate_and_preflighted(self):
+        settings = Settings(generation=Stage("anthropic", "claude-test"))
+        with patch("minutes.workflow._call") as call:
+            with self.assertRaises(ValueError):
+                run_workflow("発言", "会議", settings, {}, authorized=True)
+        call.assert_not_called()
+        out = payload()
+        with patch("minutes.workflow._call", return_value=out) as call:
+            run_workflow("発言。", "会議", settings, {}, allow_anthropic=True)
+        self.assertTrue(call.called)
+        self.assertTrue(call.call_args.kwargs["allow_anthropic"])
+
+    def test_high_quality_questions_are_deduplicated_and_cancel_stops_before_call(self):
+        settings = Settings(generation=Stage("ollama", "m"))
+        out = payload()
+        out["questions"] = ["担当者は誰ですか？", "担当者は誰ですか？"]
+        with patch("minutes.workflow._call", return_value=out) as call:
+            result = run_workflow("発言。", "会議", settings, {}, high_quality=True)
+        self.assertEqual(result.questions, ("担当者は誰ですか？",))
+        self.assertIn("questions", call.call_args.args[3]["required"])
+        with patch("minutes.workflow._call") as call:
+            with self.assertRaisesRegex(RuntimeError, "中止"):
+                run_workflow("発言。", "会議", settings, {}, is_cancelled=lambda: True)
+        call.assert_not_called()
+
     def test_disabled_generation_fails_and_off_stages_are_separate(self):
         with self.assertRaises(ValueError):
             run_workflow("発言", "会議", Settings(), {})

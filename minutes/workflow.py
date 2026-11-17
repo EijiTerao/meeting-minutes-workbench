@@ -8,10 +8,11 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
+from typing import Callable
 
 from .core import render, validate_minutes
 from .engine import SYSTEM, ollama_json
-from .routes import Settings, Stage, openai_json
+from .routes import Settings, Stage, anthropic_json, openai_json
 
 MAX_TRANSCRIPT = 192_000
 MAX_CONTEXT = 6_000
@@ -45,6 +46,7 @@ class RunResult:
     seconds: dict[str, float]
     corrections_rejected: int = 0
     verification_rejected: int = 0
+    questions: tuple[str, ...] = ()
 
 
 def _split(text: str, limit: int = SOURCE_BYTES) -> list[str]:
@@ -84,13 +86,16 @@ def _groups(source: dict[str, str], byte_limit: int) -> list[list[str]]:
     return groups
 
 
-def _call(stage: Stage, system: str, data: dict, schema: dict, authorized: bool, max_output: int) -> dict:
+def _call(stage: Stage, system: str, data: dict, schema: dict, authorized: bool, max_output: int,
+          allow_anthropic: bool = False) -> dict:
     if stage.provider == "off":
         raise ValueError("この処理段階は無効です。")
     if stage.provider == "ollama":
         return ollama_json(stage.model, system, data, schema, max_output=max_output)
     if stage.provider == "openai":
         return openai_json(stage.model, system, data, schema, authorized=authorized, max_output=max_output)
+    if stage.provider == "anthropic":
+        return anthropic_json(stage.model, system, data, schema, authorized=allow_anthropic, max_output=max_output)
     raise ValueError("処理先を確認してください。")
 
 
@@ -130,7 +135,9 @@ def _safe_correction(before: str, after: str) -> bool:
 
 
 def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
-                 references: tuple[str, ...] = (), confirmed: str = "", *, authorized: bool = False) -> RunResult:
+                 references: tuple[str, ...] = (), confirmed: str = "", *, authorized: bool = False,
+                 allow_anthropic: bool = False, high_quality: bool = False,
+                 is_cancelled: Callable[[], bool] | None = None) -> RunResult:
     if not isinstance(transcript, str) or not transcript.strip():
         raise ValueError("文字起こしを入力してください。")
     if not isinstance(title, str) or not title.strip():
@@ -151,6 +158,18 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
         raise ValueError("議事録生成が無効です。")
     if any(s.provider == "openai" for s in stages) and authorized is not True:
         raise ValueError("オンライン処理の明示的な許可が必要です。")
+    if any(s.provider == "anthropic" for s in stages) and allow_anthropic is not True:
+        raise ValueError("Anthropicへの送信には今回の実行で明示的な許可が必要です。")
+    if type(high_quality) is not bool:
+        raise ValueError("high_quality must be a boolean")
+
+    def check_cancelled() -> None:
+        if is_cancelled is not None and is_cancelled():
+            raise RuntimeError("処理を中止しました。")
+
+    def call(stage: Stage, system: str, data: dict, schema: dict, max_output: int) -> dict:
+        args = (stage, system, data, schema, authorized, max_output)
+        return _call(*args, allow_anthropic=True) if allow_anthropic else _call(*args)
 
     parts = _split(transcript)
     source = {f"S{i+1}": part for i, part in enumerate(parts)}
@@ -159,11 +178,12 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
     rejected = 0
     if settings.correction.provider != "off":
         for group in _groups(source, 7_000):
+            check_cancelled()
             chunk_rows = [{"id": key, "text": source[key]} for key in group]
             start = time.monotonic()
-            result = _call(settings.correction,
+            result = call(settings.correction,
                 "発話の誤認識だけを最小限修正する。要約・省略・言い換えは禁止。各IDを順序通り一度ずつ保つ。",
-                {"chunks": chunk_rows}, CORRECTION_SCHEMA, authorized, 8_192)
+                {"chunks": chunk_rows}, CORRECTION_SCHEMA, 8_192)
             seconds["correction"] += time.monotonic() - start
             rows = result.get("chunks")
             valid = (isinstance(rows, list) and len(rows) == len(group)
@@ -184,14 +204,30 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
     corrected = "".join(corrected_parts[k] for k in source)
 
     all_items: dict[str, list[dict]] = {key: [] for key in SECTION_KEYS}
+    questions: list[str] = []
+    generation_schema = MINUTES_SCHEMA
+    if high_quality:
+        generation_schema = json.loads(json.dumps(MINUTES_SCHEMA))
+        generation_schema["required"].append("questions")
+        generation_schema["properties"]["questions"] = {"type": "array", "items": {"type": "string"}}
     for group in _groups(corrected_parts, CHUNK_BYTES):
+        check_cancelled()
         start = time.monotonic()
-        result = _call(settings.generation, SYSTEM + "\n根拠は当該チャンク内のIDだけを配列で示す。提案を決定にせず、途中経過を推測せず、終盤の発言・結論を落とさない。",
+        result = call(settings.generation, SYSTEM + "\n根拠は当該チャンク内のIDだけを配列で示す。提案を決定にせず、途中経過を推測せず、終盤の発言・結論を落とさない。" +
+            (" 質問は、参加者、話者、日付、担当者など、確認すると今回の議事録が変わる事実だけに絞る。"
+             "発言に候補がある場合は『〈具体的な候補〉で合っていますか？』と書き、候補がない場合は詳細を聞く。候補を捏造しない。"
+             "実際の未決事項や確定済みの事実を質問にしない。" if high_quality else ""),
             {"title": title, "sources": [{"id": key, "text": corrected_parts[key]} for key in group],
              "confirmed": confirmed, "confirmed_id": "C1" if confirmed else "",
              "references": references, "style": profile.get("style_instructions", "")},
-            MINUTES_SCHEMA, authorized, 4_096)
+            generation_schema, 4_096)
         seconds["generation"] += time.monotonic() - start
+        if high_quality:
+            rows = result.get("questions")
+            if (not isinstance(rows, list) or any(not isinstance(q, str) or not q.strip() for q in rows)
+                    or sum(len(q.encode("utf-8")) for q in rows) > 16_384):
+                raise RuntimeError("確認質問の形式が合いませんでした。")
+            questions.extend(q.strip() for q in rows if q.strip())
         for section in SECTION_KEYS:
             items = result.get(section)
             if not isinstance(items, list):
@@ -250,11 +286,12 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
         if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > 12_000:
             raise ValueError("会議終盤の相反する予定が大きすぎて安全に照合できません。")
         start = time.monotonic()
-        result = _call(settings.generation,
+        check_cancelled()
+        result = call(settings.generation,
             "次回予定を原文の時系列と照合し、最終的に有効な主張のindexをselectedに列挙。"
             "C1は今回人が確認した事実であり、同じ予定で原文と異なる場合は優先。"
             "訂正前の予定や提案は除外。別々の予定なら、根拠を確認できたものをすべて残す。",
-            data, SELECT_SCHEMA, authorized, 1_024)
+            data, SELECT_SCHEMA, 1_024)
         seconds["generation"] += time.monotonic() - start
         selected = result.get("selected")
         valid_selection = (isinstance(selected, list) and all(type(i) is int for i in selected)
@@ -284,15 +321,16 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
             batches.append(batch)
         verification_rejected = 0
         for batch in batches:
+            check_cancelled()
             evidence_ids = list(dict.fromkeys(ev for _, _, it in batch for ev in it["evidence"]))
             evidence_map = {ev: source.get(ev, confirmed if ev == "C1" else "") for ev in evidence_ids}
             if len(json.dumps(evidence_map, ensure_ascii=False).encode("utf-8")) > 16_000:
                 raise ValueError("検証根拠が16KBの上限を超えました。")
             start = time.monotonic()
-            result = _call(settings.verification,
+            result = call(settings.verification,
                 "各主張が指定された根拠文に明示的に支えられる場合だけsupported=true。根拠にない推論はfalse。",
                 {"claims": [{"index": n, "section": sec, "topic": it["topic"], "text": it["text"], "evidence_ids": it["evidence"]}
-                            for n, (sec, i, it) in enumerate(batch)], "evidence": evidence_map}, VERIFY_SCHEMA, authorized, 2_048)
+                            for n, (sec, i, it) in enumerate(batch)], "evidence": evidence_map}, VERIFY_SCHEMA, 2_048)
             seconds["verification"] += time.monotonic() - start
             rows = result.get("results")
             expected = set(range(len(batch)))
@@ -313,4 +351,5 @@ def run_workflow(transcript: str, title: str, settings: Settings, profile: dict,
     clean = validate_minutes({sec: [{"topic": it["topic"], "text": it["text"]} for it in all_items[sec]] for sec in SECTION_KEYS})
     # Exercise the existing display renderer at the workflow boundary.
     render(clean, title, profile)
-    return RunResult(clean, corrected, len(parts), seconds, rejected, verification_rejected)
+    return RunResult(clean, corrected, len(parts), seconds, rejected, verification_rejected,
+                     tuple(dict.fromkeys(questions)))

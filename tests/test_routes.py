@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minutes.routes import Settings, Stage, default_path, load_settings, openai_json, save_settings
+from minutes.routes import Settings, Stage, anthropic_json, default_path, load_settings, openai_json, save_settings
 
 
 class FakeResponse:
@@ -148,6 +148,65 @@ class RoutesTests(unittest.TestCase):
                 FakeConnection.response = FakeResponse(value)
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     openai_json("model", "system", {}, {}, authorized=True)
+
+    def test_anthropic_roundtrip_call_shape_and_auth_preflight(self):
+        FakeConnection.instances.clear()
+        FakeConnection.response = FakeResponse({"type": "message", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": '{"ok":true}'}]})
+        with patch("minutes.routes.http.client.HTTPSConnection", FakeConnection), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "anthropic-test-secret"}):
+            with self.assertRaises(PermissionError):
+                anthropic_json("claude-test", "system", {}, {}, authorized=False)
+            self.assertEqual(FakeConnection.instances, [])
+            self.assertEqual(anthropic_json("claude-test", "指示", {"x": 1}, {"type": "object"}, authorized=True),
+                             {"ok": True})
+        conn = FakeConnection.instances[-1]
+        self.assertEqual(conn.host, "api.anthropic.com")
+        args, kwargs = conn.calls[0]
+        self.assertEqual(args[:2], ("POST", "/v1/messages"))
+        request = json.loads(kwargs["body"])
+        self.assertNotIn("tools", request)
+        self.assertEqual(request["output_config"]["format"], {"type": "json_schema", "schema": {"type": "object"}})
+        self.assertEqual(kwargs["headers"]["x-api-key"], "anthropic-test-secret")
+        self.assertEqual(kwargs["headers"]["anthropic-version"], "2023-06-01")
+
+    def test_anthropic_refusal_malformed_and_oversize_rejected(self):
+        cases = [
+            {"type": "message", "stop_reason": "refusal", "content": []},
+            {"type": "message", "stop_reason": "max_tokens", "content": []},
+            {"type": "message", "stop_reason": "end_turn", "content": [{"type": "tool_use"}]},
+            {"type": "message", "stop_reason": "end_turn", "content": [{"type": "text", "text": "not-json"}]},
+        ]
+        with patch("minutes.routes.http.client.HTTPSConnection", FakeConnection), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "anthropic-test-secret"}):
+            for value in cases:
+                FakeConnection.response = FakeResponse(value)
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    anthropic_json("claude-test", "system", {}, {}, authorized=True)
+
+            class Oversize:
+                status = 200
+                def read(self, size=-1):
+                    return b" " * size
+            FakeConnection.response = Oversize()
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                anthropic_json("claude-test", "system", {}, {}, authorized=True)
+
+    def test_anthropic_stage_config_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "settings.json"
+            settings = Settings(generation=Stage("anthropic", "claude-sonnet-test"))
+            save_settings(settings, path)
+            self.assertEqual(load_settings(path), settings)
+            self.assertNotIn("ANTHROPIC_API_KEY", path.read_text())
+
+    def test_anthropic_oversize_request_fails_before_connect(self):
+        FakeConnection.instances.clear()
+        with patch("minutes.routes.http.client.HTTPSConnection", FakeConnection), \
+             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "anthropic-test-secret"}):
+            with self.assertRaisesRegex(ValueError, "request exceeded size limit"):
+                anthropic_json("claude-test", "system", {"large": "x" * 81_000}, {}, authorized=True)
+        self.assertEqual(FakeConnection.instances, [])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Explicit, local-first provider settings and bounded OpenAI Responses calls."""
+"""Explicit, local-first provider settings and bounded API calls."""
 from __future__ import annotations
 
 import http.client
@@ -80,7 +80,7 @@ def _validate_settings(s: Settings) -> None:
         _safe_string(s.whisper_model, "whisper model", empty=True)
     for name in _STAGE_NAMES:
         stage = getattr(s, name)
-        if not isinstance(stage, Stage) or stage.provider not in ("off", "ollama", "openai"):
+        if not isinstance(stage, Stage) or stage.provider not in ("off", "ollama", "openai", "anthropic"):
             raise ValueError(f"invalid {name} provider")
         if stage.provider == "off":
             if stage.model:
@@ -293,6 +293,76 @@ def openai_json(model: str, system: str, data: dict, schema: dict, *,
     try:
         parsed = json.loads(texts[0])
     except json.JSONDecodeError as exc:
+        raise ValueError("provider output was not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("provider output must be a JSON object")
+    return parsed
+
+
+def anthropic_json(model: str, system: str, data: dict, schema: dict, *,
+                   authorized: bool = False, max_output: int = 4096) -> dict:
+    """Call fixed Anthropic Messages endpoint; authorization is stage-independent."""
+    if authorized is not True:
+        raise PermissionError("explicit authorization is required")
+    model = _safe_string(model, "model")
+    if not _MODEL.fullmatch(model):
+        raise ValueError("invalid model name")
+    if not isinstance(system, str) or not system.strip() or len(system) > 16_384:
+        raise ValueError("system must be a bounded non-empty string")
+    if any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 or
+           0xD800 <= ord(char) <= 0xDFFF for char in system) or _KEY.search(system):
+        raise ValueError("system contains a prohibited value")
+    if not isinstance(data, dict) or not isinstance(schema, dict):
+        raise ValueError("data and schema must be objects")
+    if not isinstance(max_output, int) or isinstance(max_output, bool) or not 1 <= max_output <= 16384:
+        raise ValueError("max_output must be between 1 and 16384")
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key or any(ord(c) < 32 for c in key):
+        raise ValueError("ANTHROPIC_API_KEY is unavailable")
+    try:
+        body = {
+            "model": model, "max_tokens": max_output, "system": system,
+            "messages": [{"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}},
+        }
+        body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError("request data is not valid bounded JSON") from exc
+    if len(body_bytes) > 80_000:
+        raise ValueError("provider request exceeded size limit")
+    connection = http.client.HTTPSConnection("api.anthropic.com", timeout=120, context=None)
+    try:
+        connection.request("POST", "/v1/messages", body=body_bytes, headers={
+            "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json",
+        })
+        response = connection.getresponse()
+        raw = response.read(1_048_577)
+        if len(raw) > 1_048_576:
+            raise ValueError("provider response exceeded size limit")
+        if response.status != 200:
+            raise ValueError(f"provider request failed with HTTP {response.status}")
+    except (OSError, http.client.HTTPException) as exc:
+        raise ValueError("provider request failed") from exc
+    finally:
+        connection.close()
+    try:
+        result = json.loads(raw, object_pairs_hook=_pairs_no_duplicates)
+    except (json.JSONDecodeError, UnicodeError, RecursionError, ValueError) as exc:
+        raise ValueError("provider returned invalid JSON") from exc
+    if not isinstance(result, dict) or result.get("type") != "message":
+        raise ValueError("provider response was malformed")
+    if result.get("stop_reason") == "refusal":
+        raise ValueError("provider refused the request")
+    if result.get("stop_reason") != "end_turn":
+        raise ValueError("provider response was not completed")
+    content = result.get("content")
+    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict):
+        raise ValueError("provider response content was malformed")
+    if content[0].get("type") != "text" or not isinstance(content[0].get("text"), str):
+        raise ValueError("provider response must contain exactly one text block")
+    try:
+        parsed = json.loads(content[0]["text"])
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("provider output was not valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ValueError("provider output must be a JSON object")

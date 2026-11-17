@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import wave
+from typing import Callable
 from pathlib import Path
 
 from .core import validate_minutes
@@ -157,40 +158,142 @@ def ollama_json(model: str, system: str, data: dict, schema: dict,
     return result
 
 
-def transcribe(wav: Path, executable: Path, model_path: Path, language: str = "ja") -> str:
+ASR_SEGMENT_SECONDS = 5 * 60
+_PART_NAME = re.compile(r"part-(\d{6})\.wav\Z")
+
+
+def _validate_wav(path: Path) -> None:
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16_000):
+                raise ValueError("16kHz・16bit・モノラルPCMのWAVを選んでください。")
+            if audio.getnframes() <= 0:
+                raise ValueError("空のWAVは処理できません。")
+    except (wave.Error, EOFError, OSError):
+        raise ValueError("WAVを読み込めませんでした。") from None
+
+
+def _input_parts(source: Path) -> list[Path]:
+    if source.is_dir() and not source.is_symlink():
+        matches: list[tuple[int, Path]] = []
+        try:
+            for child in source.iterdir():
+                match = _PART_NAME.fullmatch(child.name)
+                if match:
+                    if child.is_symlink() or not child.is_file():
+                        raise ValueError(f"録音パート {child.name} は通常のファイルではありません。")
+                    matches.append((int(match.group(1)), child))
+        except OSError:
+            raise ValueError("録音パートのフォルダを読み込めませんでした。") from None
+        matches.sort()
+        if not matches or [number for number, _ in matches] != list(range(1, len(matches) + 1)):
+            raise ValueError("録音パート part-000001.wav からの連番を確認してください。")
+        marker = source / "recording-complete.json"
+        if marker.exists() or marker.is_symlink():
+            if marker.is_symlink() or not marker.is_file():
+                raise ValueError("録音完了マーカーは通常のファイルではありません。")
+            try:
+                if marker.stat().st_size > 1_024:
+                    raise ValueError("録音完了マーカーの形式を確認してください。")
+                data = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                raise ValueError("録音完了マーカーを読み込めませんでした。") from None
+            if (not isinstance(data, dict) or set(data) != {"version", "parts"}
+                    or type(data["version"]) is not int or data["version"] != 1
+                    or type(data["parts"]) is not int or data["parts"] != len(matches)):
+                raise ValueError("録音完了マーカーと録音パート数が一致しません。")
+        return [path for _, path in matches]
+    if source.is_symlink() or source.suffix.lower() != ".wav" or not source.is_file():
+        raise ValueError("WAVファイルまたは録音パートのフォルダを選んでください。")
+    return [source]
+
+
+def transcribe(wav: Path, executable: Path, model_path: Path, language: str = "ja",
+               *, on_part: Callable[[int, str], None] | None = None,
+               resume_parts: dict[int, str] | None = None) -> str:
     if not executable.is_absolute() or executable.name.lower() not in {"whisper-cli", "whisper-cli.exe"}:
         raise ValueError("信頼できる配布元から取得した whisper-cli の実行ファイルを選んでください。")
     if not re.fullmatch(r"[a-z]{2,3}|auto", language):
         raise ValueError("文字起こしの言語指定を確認してください。")
-    if wav.suffix.lower() != ".wav" or not wav.is_file():
-        raise ValueError("WAVファイルを選んでください。")
     if not executable.is_file() or not model_path.is_file():
         raise ValueError("whisper-cli またはモデルが見つかりません。")
-    wav, executable, model_path = wav.resolve(), executable.resolve(), model_path.resolve()
-    try:
-        with wave.open(str(wav), "rb") as audio:
-            if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16_000):
-                raise ValueError("16kHz・16bit・モノラルPCMのWAVを選んでください。")
-            if not 0 < audio.getnframes() <= 16_000 * 60 * 60:
-                raise ValueError("WAVの長さは1時間以内にしてください。")
-    except (wave.Error, EOFError):
-        raise ValueError("WAVを読み込めませんでした。") from None
+    source = Path(wav)
+    parts = _input_parts(source)
+    for part in parts:
+        _validate_wav(part)
+    executable, model_path = executable.resolve(), model_path.resolve()
     env = {
         key: os.environ[key] for key in ("SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL")
         if key in os.environ
     }
+    transcript: list[str] = []
+    segment_index = 0
+    resume_parts = resume_parts or {}
     with tempfile.TemporaryDirectory(prefix="minutes-asr-") as workspace:
-        base = str(Path(workspace) / "transcript")
-        try:
-            subprocess.run(
-                [str(executable), "-m", str(model_path), "-f", str(wav),
-                 "-l", language, "-otxt", "-of", base],
-                cwd=workspace, env=env, shell=False, stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1_800,
-            )
-            result = read_input(Path(base + ".txt"))
-        except (OSError, subprocess.SubprocessError):
-            raise RuntimeError("文字起こしに失敗しました。実行ファイル・モデル・WAVを確認してください。") from None
-    if not result.strip():
+        root = Path(workspace)
+        segment_frames = ASR_SEGMENT_SECONDS * 16_000
+        segment_pcm: list[bytes] = []
+        segment_bytes = 0
+
+        def recognize_segment(frames: int, source_name: str) -> None:
+            nonlocal segment_index, segment_bytes
+            segment_index += 1
+            if segment_index in resume_parts:
+                result = resume_parts[segment_index]
+                transcript.append(result)
+                segment_pcm.clear()
+                segment_bytes = 0
+                if on_part is not None:
+                    on_part(segment_index, result)
+                return
+            segment = root / "segment.wav"
+            with wave.open(str(segment), "wb") as output:
+                output.setparams((1, 2, 16_000, frames, "NONE", "not compressed"))
+                for pcm_chunk in segment_pcm:
+                    output.writeframesraw(pcm_chunk)
+            base = str(root / "transcript")
+            output_text = Path(base + ".txt")
+            output_text.unlink(missing_ok=True)
+            try:
+                subprocess.run(
+                    [str(executable), "-m", str(model_path), "-f", str(segment),
+                     "-l", language, "-otxt", "-of", base],
+                    cwd=workspace, env=env, shell=False, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1_800,
+                )
+                result = read_input(output_text)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                raise RuntimeError(f"文字起こしに失敗しました（{source_name} の区間 {segment_index}）。") from exc
+            transcript.append(result)
+            segment_pcm.clear()
+            segment_bytes = 0
+            if on_part is not None:
+                try:
+                    on_part(segment_index, result)
+                except OSError as exc:
+                    raise RuntimeError("文字起こしの進捗を保存できませんでした。") from exc
+
+        for input_path in parts:
+            try:
+                with wave.open(str(input_path), "rb") as audio:
+                    remaining = audio.getnframes()
+                    while remaining:
+                        available = (segment_frames * 2 - segment_bytes) // 2
+                        frames = min(remaining, available)
+                        pcm = audio.readframes(frames)
+                        if len(pcm) != frames * 2:
+                            raise RuntimeError(
+                                f"WAVデータが途中で終わっています（{input_path.name} の区間 {segment_index + 1}）。"
+                            )
+                        segment_pcm.append(pcm)
+                        segment_bytes += len(pcm)
+                        remaining -= frames
+                        if segment_bytes == segment_frames * 2:
+                            recognize_segment(segment_frames, input_path.name)
+            except (wave.Error, EOFError, OSError):
+                raise RuntimeError(f"WAVを読み込めませんでした（{input_path.name}）。") from None
+        if segment_bytes:
+            recognize_segment(segment_bytes // 2, parts[-1].name)
+    if not any(result.strip() for result in transcript):
         raise RuntimeError("認識できた発話がありませんでした。")
-    return result
+    return "\n".join(result for result in transcript if result.strip())

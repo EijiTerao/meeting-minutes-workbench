@@ -7,14 +7,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {
-    ".github/workflows/test.yml", ".gitignore", "README.md", "examples/minutes.json", "examples/profile.json",
+    ".github/workflows/test.yml", ".gitignore", "README.md", "AI-SETUP.md", "AGENTS.md", "CLAUDE.md",
+    "examples/minutes.json", "examples/profile.json",
     "capture/recorder.html", "capture/recorder.js",
     "examples/transcript.txt", "examples/benchmark-transcript.txt", "examples/benchmark-minutes.json",
-    "examples/pipeline-config.json", "minutes/__init__.py", "minutes/__main__.py",
-    "minutes/core.py", "minutes/engine.py", "minutes/gui.py", "tests/test_core.py",
+    "examples/pipeline-config.json", "minutes/__init__.py", "minutes/__main__.py", "minutes/asr_job.py",
+    "minutes/core.py", "minutes/engine.py", "minutes/gui.py", "minutes/history.py", "tests/test_core.py", "tests/test_history.py",
     "minutes/routes.py", "minutes/workflow.py", "tests/test_engine.py", "tests/test_gui.py",
+    "minutes/setup.py", "tests/test_setup.py",
+    "minutes/live_transcript.py", "tests/test_live_transcript.py",
+    "minutes/recorder_host.py", "tests/test_recorder_host.py",
+    "minutes/desktop_capture.py", "tests/test_desktop_capture.py", "tools/build_public_macos.py",
     "tests/test_routes.py", "tests/test_workflow.py", "tests/test_benchmark.py", "tests/recorder.test.cjs",
-    "tools/benchmark_minutes.py", "tools/check_public_tree.py",
+    "tools/benchmark_minutes.py", "tools/check_public_tree.py", "native/macos/SystemAudioCapture.swift",
+    "native/macos/TranscribeAudio.swift", "native/macos/app/Package.swift",
+    "native/macos/app/Sources/MeetingMinutesWorkbench/App.swift",
+    "native/macos/app/Sources/MeetingMinutesWorkbench/MeetingView.swift",
+    "native/macos/app/Sources/MeetingMinutesWorkbench/MeetingControlStyles.swift",
+    "native/macos/app/Sources/MeetingMinutesWorkbench/NativeMinutes.swift",
+    "native/macos/app/Sources/MeetingMinutesWorkbench/WorkbenchModel.swift",
+    "native/windows/Capture-SystemAudio.ps1", "native/windows/SystemAudioCapture.cs",
 }
 OPTIONAL = {"LICENSE"}
 RULES = {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: blob:; worker-src blob:; style-src 'unsafe-inline'; img-src 'none'; media-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file: blob:; worker-src blob:; style-src 'unsafe-inline'; img-src 'none'; media-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';">
   <title>ローカル音声キャプチャ</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
@@ -19,17 +19,33 @@
 <body>
   <main>
     <h1>ローカル音声キャプチャ</h1>
-    <p class="notice">このページは端末内で動作し、録音データをブラウザー内にだけ一時保持します。サーバー送信・自動保存・再生は行いません。停止後にWAVを自分で保存してください。</p>
-    <p>対象の音声だけを選んでください。共有タブ音声はブラウザーが共有画面を求めますが、映像は処理・表示・保存しません。OS音声全体やネイティブアプリ音声は取得できるとは限りません。</p>
+    <p class="notice">標準では文字起こしだけを保存し、原音WAVは残しません。参加者に説明し「原音も保存する」を選んだ場合だけ、WAVを手動保存または選択先へ保存します。</p>
     <fieldset id="choices">
-      <legend>音声ソース（録音開始時にブラウザーの許可が必要です）</legend>
-      <label><input type="radio" name="source" value="mic" checked> マイク</label>
-      <label><input type="radio" name="source" value="tab"> 共有タブの音声</label>
-      <label><input type="radio" name="source" value="both"> マイク＋共有タブ音声</label>
-      <label><input id="consent" type="checkbox"> 選択した音声だけを録音し、停止後に自分で保存することを確認しました</label>
+      <legend>会議の種類</legend>
+      <label><input id="inPerson" type="radio" name="meetingType" value="inperson" checked> 対面（マイク）</label>
+      <label><input id="online" type="radio" name="meetingType" value="online" aria-controls="onlineChoices"> オンライン</label>
+      <div id="onlineChoices" hidden>
+        <p id="captureScopeHelp" aria-live="polite">PCの再生音を録音します。アプリの指定は不要です。通知音や他のアプリの音も入り得ます。</p>
+        <label><input id="includeMic" type="checkbox" checked> マイクも録る</label>
+        <label><input id="tabOnly" type="checkbox"> 共有するタブの音声だけに絞る（任意）</label>
+        <p>「録音開始」を押すと、ブラウザーの共有画面が開きます。共有対象と「音声を共有」を選んでください。映像は保存しません。</p>
+      </div>
+      <label><input id="consent" type="checkbox"> <span id="consentText">マイクを録音し、文字起こしを保存することを参加者と確認しました</span></label>
     </fieldset>
-    <p>録音は最大15分です。ブラウザーを閉じる前に保存してください。音声データはメモリー上限を設け、ページを閉じると失われます。</p>
-    <p>ブラウザーがローカルファイルでの音声APIやAudioWorkletに対応しない場合、このページは録音を開始しません。サーバー経由へ切り替えず、対応ブラウザーで再度お試しください。</p>
+    <fieldset id="modeChoices">
+      <legend>保存方式</legend>
+      <p id="textMode">標準: 文字起こしを保存（原音は保存しない）</p>
+      <label><input id="saveAudio" type="checkbox"> 原音も保存する（WAV）</label>
+      <div id="rawModes" hidden>
+        <label><input id="shortMode" type="radio" name="rawMode" value="short" checked> 短時間（最大15分・停止後に手動保存）</label>
+        <label><input id="longMode" type="radio" name="rawMode" value="long"> 長時間（録音中、選択先へ5秒ごとのWAVパートを保存）</label>
+      </div>
+      <button id="prepare" type="button">長時間保存先を準備</button>
+      <span id="longReady" role="status"></span>
+      <p id="bridgeStatus" role="status">文字起こし保存を確認中…</p>
+    </fieldset>
+    <p>文字起こし保存が利用できない場合、原音保存を明示選択したときだけWAVのみで録音できます。原音保存へ自動では切り替えません。長時間WAVは保存先を準備してください。</p>
+    <p>ブラウザーが音声APIやAudioWorkletに対応しない場合、このページは録音を開始しません。</p>
     <div>
       <button id="start" type="button">録音開始</button>
       <button id="stop" type="button" disabled>停止</button>

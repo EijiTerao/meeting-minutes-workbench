@@ -25,4 +25,18 @@ jobs:
           python-version: "3.11"
       - run: python -B -m unittest discover -s tests
       - run: node --test tests/recorder.test.cjs
+      - if: runner.os == 'macOS'
+        run: |
+          swiftc -parse-as-library -typecheck native/macos/SystemAudioCapture.swift
+          sdk_major=$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)
+          if [ "$sdk_major" -ge 26 ]; then
+            swiftc -parse-as-library -typecheck native/macos/TranscribeAudio.swift
+            swift build --package-path native/macos/app --jobs 2
+            native/macos/app/.build/debug/MeetingMinutesWorkbench --self-test
+          else
+            echo "Optional Apple Speech helper requires macOS SDK 26 or newer."
+          fi
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: .\native\windows\Capture-SystemAudio.ps1 -SelfTest
       - run: python -B tools/check_public_tree.py
