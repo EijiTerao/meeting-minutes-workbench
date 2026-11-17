@@ -273,14 +273,15 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(outside.read_bytes(), b"outside data\n")
 
         raced = self.root / "raced" / "settings.json"
-        original_link = os.link
+        publish_method = "rename" if os.name == "nt" else "link"
+        original_publish = getattr(os, publish_method)
 
         def create_competing_target(source, destination, *args, **kwargs):
             Path(destination).write_bytes(b"concurrent winner\n")
-            return original_link(source, destination, *args, **kwargs)
+            return original_publish(source, destination, *args, **kwargs)
 
         with self.assertRaisesRegex(ValueError, "appeared during setup"):
-            with patch("minutes.setup.os.link", side_effect=create_competing_target):
+            with patch.object(setup.os, publish_method, side_effect=create_competing_target):
                 setup.create_settings(Settings(), raced)
         self.assertEqual(raced.read_bytes(), b"concurrent winner\n")
         self.assertFalse(any(raced.parent.glob(".settings-*")))

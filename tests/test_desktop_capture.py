@@ -14,6 +14,11 @@ from minutes.desktop_capture import DesktopCapture
 from minutes.live_transcript import WINDOW_BYTES
 
 
+def _capture_helper_fixture(root: Path) -> str:
+    # The helper is stubbed, but its path still has to be absolute on this OS.
+    return str(root / "workbench-system-audio-fixture")
+
+
 class _Process:
     def __init__(self, pcm: bytes, stop_code: int = 0, natural_exit: bool = False):
         self.stdout = io.BytesIO(pcm)
@@ -64,7 +69,7 @@ class DesktopCaptureTest(unittest.TestCase):
             args_seen.extend(args)
             return _Process(pcm)
 
-        capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio",
+        capture = DesktopCapture(capture_helper=_capture_helper_fixture(root),
                                  recognizer=recognizer or _Recognizer(), capture_factory=factory)
         def on_event(state, payload):
             events.append((state, payload))
@@ -127,7 +132,7 @@ class DesktopCaptureTest(unittest.TestCase):
             root = Path(temp)
             output = root / "transcript.txt"
             output.write_text("keep", encoding="utf-8")
-            capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio", recognizer=_Recognizer())
+            capture = DesktopCapture(capture_helper=_capture_helper_fixture(root), recognizer=_Recognizer())
             with self.assertRaises(ValueError):
                 capture.start(output, mode="microphone-only")
 
@@ -138,7 +143,7 @@ class DesktopCaptureTest(unittest.TestCase):
             root = Path(temp)
             lock = threading.BoundedSemaphore(1)
             lock.acquire()
-            capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio",
+            capture = DesktopCapture(capture_helper=_capture_helper_fixture(root),
                                      recognizer=_Recognizer(), capture_lock=lock)
             with self.assertRaisesRegex(RuntimeError, "別の会議で録音中"):
                 capture.start(root / "parallel.txt", mode="microphone-only")
@@ -152,7 +157,7 @@ class DesktopCaptureTest(unittest.TestCase):
             started = threading.Event()
             stopped = threading.Event()
             process = _Process(b"x" * 12, stop_code=137)
-            capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio",
+            capture = DesktopCapture(capture_helper=_capture_helper_fixture(root),
                                      recognizer=_Recognizer(), capture_factory=lambda *_args, **_kwargs: process)
             def on_event(state, payload):
                 events.append((state, payload))
@@ -176,7 +181,7 @@ class DesktopCaptureTest(unittest.TestCase):
             lock = threading.BoundedSemaphore(1)
             def unavailable(*_args, **_kwargs):
                 raise OSError("synthetic helper outage")
-            capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio",
+            capture = DesktopCapture(capture_helper=_capture_helper_fixture(root),
                                      recognizer=_Recognizer(), capture_factory=unavailable,
                                      capture_lock=lock)
             capture.start(root / "outage.txt", mode="microphone-only",
@@ -195,7 +200,7 @@ class DesktopCaptureTest(unittest.TestCase):
             events = []
             stopped = threading.Event()
             process = _Process(b"x" * 12, natural_exit=True)
-            capture = DesktopCapture(capture_helper="/fixture/workbench-system-audio",
+            capture = DesktopCapture(capture_helper=_capture_helper_fixture(root),
                                      recognizer=_Recognizer(), capture_factory=lambda *_args, **_kwargs: process)
             capture.start(output, mode="whole-mac", save_wav_parts=True,
                           on_event=lambda state, payload: (events.append((state, payload)),
